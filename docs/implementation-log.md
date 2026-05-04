@@ -2,6 +2,12 @@
 
 > Prior entries in `docs/history/`: `implementation-log-through-0.12.0.md`, `implementation-log-through-0.11.0.md`, `implementation-log-through-0.10.0.md`, `implementation-log-through-0.9.4.md`, `implementation-log-through-2026-04-15.md`, `implementation-log-through-2026-04-12.md`.
 
+## 2026-05-04 — Runtime tunnel access gate
+
+Runtime request hardening now supports explicit remote-access configuration instead of only local bind hosts. `QUARTERDECK_ALLOWED_HOSTS` adds browser-facing Host/Origin entries for proxies such as Cloudflare Tunnel while keeping the default local allowlist narrow. `QUARTERDECK_ACCESS_PASSWORD` enables HTTP Basic auth across static assets, tRPC, runtime-state WebSockets, and terminal WebSockets, with `QUARTERDECK_ACCESS_USERNAME` defaulting to `quarterdeck`.
+
+The key invariant is that remote access remains opt-in and shares the same middleware path as local Host/Origin enforcement, so HTTP and WebSocket gates cannot drift. Notable files: `src/server/middleware.ts`, `test/runtime/server/middleware.test.ts`, and `README.md`. Validation: focused middleware tests. Commit: pending.
+
 ## 2026-05-01 — Actionable task notification ownership
 
 Project/board needs-input indicators now consume an actionable notification projection instead of raw retained session summaries. Authoritative notification snapshots/replacements keep only in-progress/review cards, live notification deltas stay lax enough to survive the browser board-save debounce, and explicit task stops enter an interrupted review path that clears permission hook activity before PTY exit cleanup can replay review state.

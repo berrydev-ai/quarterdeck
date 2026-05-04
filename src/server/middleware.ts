@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 
@@ -28,6 +29,15 @@ export interface HostGateInput {
 	allowedHosts: ReadonlySet<string>;
 }
 
+export type AccessAuthDecision = { kind: "allow" } | { kind: "reject" };
+
+export interface AccessAuthInput {
+	authorizationHeader: string | undefined;
+	cookieHeader: string | undefined;
+	password: string | null;
+	username: string;
+}
+
 function isDevelopmentMode(): boolean {
 	return process.env.NODE_ENV === "development";
 }
@@ -43,6 +53,10 @@ function addHttpOrigin(origins: Set<string>, host: string, port: number): void {
 
 function addHostHeader(hosts: Set<string>, host: string, port: number): void {
 	hosts.add(`${host}:${port}`.toLowerCase());
+}
+
+function addExternalHostHeader(hosts: Set<string>, host: string): void {
+	hosts.add(host.toLowerCase());
 }
 
 function readOptionalPort(value: string | undefined): number | null {
@@ -65,6 +79,43 @@ function getDevelopmentWebUiPorts(): number[] {
 	return [...ports];
 }
 
+function parseExternalHostAllowlist(): Array<{ host: string; origins: string[] }> {
+	const raw = process.env.QUARTERDECK_ALLOWED_HOSTS?.trim();
+	if (!raw) {
+		return [];
+	}
+
+	const entries: Array<{ host: string; origins: string[] }> = [];
+	for (const part of raw.split(",")) {
+		const value = part.trim();
+		if (!value) {
+			continue;
+		}
+
+		if (value.startsWith("http://") || value.startsWith("https://")) {
+			try {
+				const url = new URL(value);
+				if (!url.host) {
+					continue;
+				}
+				entries.push({ host: url.host.toLowerCase(), origins: [url.origin] });
+			} catch {
+				continue;
+			}
+			continue;
+		}
+
+		if (value.includes("/") || value.includes("@")) {
+			continue;
+		}
+		entries.push({
+			host: value.toLowerCase(),
+			origins: [`http://${value.toLowerCase()}`, `https://${value.toLowerCase()}`],
+		});
+	}
+	return entries;
+}
+
 export function getAllowedRuntimeOrigins(): ReadonlySet<string> {
 	const port = getQuarterdeckRuntimePort();
 	const runtimeHost = getQuarterdeckRuntimeHost().toLowerCase();
@@ -83,6 +134,12 @@ export function getAllowedRuntimeOrigins(): ReadonlySet<string> {
 		}
 	}
 
+	for (const entry of parseExternalHostAllowlist()) {
+		for (const origin of entry.origins) {
+			allowed.add(origin);
+		}
+	}
+
 	return allowed;
 }
 
@@ -95,6 +152,10 @@ export function getAllowedHostHeaders(): ReadonlySet<string> {
 	addHostHeader(allowed, "127.0.0.1", port);
 	addHostHeader(allowed, "localhost", port);
 	addHostHeader(allowed, "[::1]", port);
+
+	for (const entry of parseExternalHostAllowlist()) {
+		addExternalHostHeader(allowed, entry.host);
+	}
 
 	return allowed;
 }
@@ -129,6 +190,83 @@ export function evaluateHost(input: HostGateInput): HostDecision {
 	return { kind: "allow" };
 }
 
+function getAccessPassword(): string | null {
+	const value = process.env.QUARTERDECK_ACCESS_PASSWORD?.trim();
+	return value ? value : null;
+}
+
+function getAccessUsername(): string {
+	return process.env.QUARTERDECK_ACCESS_USERNAME?.trim() || "quarterdeck";
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+	const left = Buffer.from(a);
+	const right = Buffer.from(b);
+	return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function buildAccessToken(username: string, password: string): string {
+	return createHash("sha256").update(`${username}:${password}`).digest("hex");
+}
+
+function readAccessCookie(cookieHeader: string | undefined): string | null {
+	const header = normalizeHeaderValue(cookieHeader);
+	if (header === null) {
+		return null;
+	}
+	for (const part of header.split(";")) {
+		const [rawName, ...rawValueParts] = part.trim().split("=");
+		if (rawName === "quarterdeck_access") {
+			const value = rawValueParts.join("=").trim();
+			return value ? value : null;
+		}
+	}
+	return null;
+}
+
+export function evaluateAccessAuth(input: AccessAuthInput): AccessAuthDecision {
+	if (input.password === null) {
+		return { kind: "allow" };
+	}
+
+	const accessToken = buildAccessToken(input.username, input.password);
+	const cookieToken = readAccessCookie(input.cookieHeader);
+	if (cookieToken !== null && timingSafeStringEqual(cookieToken, accessToken)) {
+		return { kind: "allow" };
+	}
+
+	const header = normalizeHeaderValue(input.authorizationHeader);
+	if (header === null || !header.toLowerCase().startsWith("basic ")) {
+		return { kind: "reject" };
+	}
+
+	const encodedCredentials = header.slice(6).trim();
+	let decodedCredentials: string;
+	try {
+		decodedCredentials = Buffer.from(encodedCredentials, "base64").toString("utf8");
+	} catch {
+		return { kind: "reject" };
+	}
+
+	const separatorIndex = decodedCredentials.indexOf(":");
+	if (separatorIndex < 0) {
+		return { kind: "reject" };
+	}
+
+	const username = decodedCredentials.slice(0, separatorIndex);
+	const password = decodedCredentials.slice(separatorIndex + 1);
+	if (!timingSafeStringEqual(username, input.username) || !timingSafeStringEqual(password, input.password)) {
+		return { kind: "reject" };
+	}
+
+	return { kind: "allow" };
+}
+
+function buildAccessCookie(username: string, password: string): string {
+	const token = buildAccessToken(username, password);
+	return `quarterdeck_access=${token}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
 function applyAllowedOriginHeaders(res: ServerResponse, origin: string): void {
 	res.setHeader("Access-Control-Allow-Origin", origin);
 	res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -144,8 +282,26 @@ function rejectHttpRequest(res: ServerResponse, message: string): { end: true } 
 	return { end: true };
 }
 
+function rejectUnauthorizedHttpRequest(res: ServerResponse): { end: true } {
+	res.writeHead(401, {
+		"Cache-Control": "no-store",
+		"Content-Type": "application/json; charset=utf-8",
+		"WWW-Authenticate": 'Basic realm="Quarterdeck", charset="UTF-8"',
+	});
+	res.end(JSON.stringify({ error: "Authentication required." }));
+	return { end: true };
+}
+
 function rejectSocketUpgrade(socket: Duplex): { end: true } {
 	socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+	socket.destroy();
+	return { end: true };
+}
+
+function rejectUnauthorizedSocketUpgrade(socket: Duplex): { end: true } {
+	socket.write(
+		'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="Quarterdeck", charset="UTF-8"\r\nConnection: close\r\n\r\n',
+	);
 	socket.destroy();
 	return { end: true };
 }
@@ -168,6 +324,21 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): { 
 		case "allow": {
 			if (corsDecision.origin !== null) {
 				applyAllowedOriginHeaders(res, corsDecision.origin);
+			}
+			const authDecision = evaluateAccessAuth({
+				authorizationHeader: Array.isArray(req.headers.authorization)
+					? req.headers.authorization[0]
+					: req.headers.authorization,
+				cookieHeader: Array.isArray(req.headers.cookie) ? req.headers.cookie[0] : req.headers.cookie,
+				password: getAccessPassword(),
+				username: getAccessUsername(),
+			});
+			if (authDecision.kind === "reject") {
+				return rejectUnauthorizedHttpRequest(res);
+			}
+			const accessPassword = getAccessPassword();
+			if (accessPassword !== null) {
+				res.setHeader("Set-Cookie", buildAccessCookie(getAccessUsername(), accessPassword));
 			}
 			return { end: false };
 		}
@@ -202,6 +373,18 @@ export function handleSocketUpgrade(request: IncomingMessage, socket: Duplex): {
 	});
 	if (corsDecision.kind === "reject") {
 		return rejectSocketUpgrade(socket);
+	}
+
+	const authDecision = evaluateAccessAuth({
+		authorizationHeader: Array.isArray(request.headers.authorization)
+			? request.headers.authorization[0]
+			: request.headers.authorization,
+		cookieHeader: Array.isArray(request.headers.cookie) ? request.headers.cookie[0] : request.headers.cookie,
+		password: getAccessPassword(),
+		username: getAccessUsername(),
+	});
+	if (authDecision.kind === "reject") {
+		return rejectUnauthorizedSocketUpgrade(socket);
 	}
 
 	return { end: false };

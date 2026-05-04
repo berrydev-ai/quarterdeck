@@ -9,6 +9,7 @@ import {
 	setQuarterdeckRuntimePort,
 } from "../../../src/core";
 import {
+	evaluateAccessAuth,
 	evaluateCors,
 	evaluateHost,
 	getAllowedHostHeaders,
@@ -20,6 +21,9 @@ const originalRuntimeHost = getQuarterdeckRuntimeHost();
 const originalRuntimePort = getQuarterdeckRuntimePort();
 const originalNodeEnv = process.env.NODE_ENV;
 const originalE2eWebPort = process.env.QUARTERDECK_E2E_WEB_PORT;
+const originalAllowedHosts = process.env.QUARTERDECK_ALLOWED_HOSTS;
+const originalAccessUsername = process.env.QUARTERDECK_ACCESS_USERNAME;
+const originalAccessPassword = process.env.QUARTERDECK_ACCESS_PASSWORD;
 
 function makeFakeRequest(headers: Partial<IncomingMessage["headers"]>, method = "GET"): IncomingMessage {
 	return { method, headers } as IncomingMessage;
@@ -37,6 +41,21 @@ afterEach(() => {
 		delete process.env.QUARTERDECK_E2E_WEB_PORT;
 	} else {
 		process.env.QUARTERDECK_E2E_WEB_PORT = originalE2eWebPort;
+	}
+	if (originalAllowedHosts === undefined) {
+		delete process.env.QUARTERDECK_ALLOWED_HOSTS;
+	} else {
+		process.env.QUARTERDECK_ALLOWED_HOSTS = originalAllowedHosts;
+	}
+	if (originalAccessUsername === undefined) {
+		delete process.env.QUARTERDECK_ACCESS_USERNAME;
+	} else {
+		process.env.QUARTERDECK_ACCESS_USERNAME = originalAccessUsername;
+	}
+	if (originalAccessPassword === undefined) {
+		delete process.env.QUARTERDECK_ACCESS_PASSWORD;
+	} else {
+		process.env.QUARTERDECK_ACCESS_PASSWORD = originalAccessPassword;
 	}
 });
 
@@ -125,6 +144,77 @@ describe("runtime allowlists", () => {
 		process.env.QUARTERDECK_E2E_WEB_PORT = "4174";
 		expect(getAllowedRuntimeOrigins()).toContain("http://127.0.0.1:4174");
 	});
+
+	it("allows externally configured tunnel hosts and derives browser origins", () => {
+		setQuarterdeckRuntimePort(3500);
+		process.env.QUARTERDECK_ALLOWED_HOSTS = "kanban.example.com, https://board.example.com, dev.example.com:8080";
+
+		expect(getAllowedHostHeaders()).toContain("kanban.example.com");
+		expect(getAllowedHostHeaders()).toContain("board.example.com");
+		expect(getAllowedHostHeaders()).toContain("dev.example.com:8080");
+		expect(getAllowedRuntimeOrigins()).toContain("https://kanban.example.com");
+		expect(getAllowedRuntimeOrigins()).toContain("https://board.example.com");
+		expect(getAllowedRuntimeOrigins()).toContain("http://dev.example.com:8080");
+		expect(getAllowedRuntimeOrigins()).toContain("https://dev.example.com:8080");
+	});
+});
+
+describe("evaluateAccessAuth", () => {
+	it("allows all requests when no access password is configured", () => {
+		expect(
+			evaluateAccessAuth({
+				authorizationHeader: undefined,
+				cookieHeader: undefined,
+				password: null,
+				username: "quarterdeck",
+			}),
+		).toEqual({ kind: "allow" });
+	});
+
+	it("allows valid basic credentials", () => {
+		const credentials = Buffer.from("quarterdeck:secret").toString("base64");
+
+		expect(
+			evaluateAccessAuth({
+				authorizationHeader: `Basic ${credentials}`,
+				cookieHeader: undefined,
+				password: "secret",
+				username: "quarterdeck",
+			}),
+		).toEqual({ kind: "allow" });
+	});
+
+	it("allows valid access cookies", () => {
+		expect(
+			evaluateAccessAuth({
+				authorizationHeader: undefined,
+				cookieHeader: "quarterdeck_access=e952d0361eefc8269bd0a0e7bead40110e2255cee73831079c5924adbeeb1085",
+				password: "secret",
+				username: "quarterdeck",
+			}),
+		).toEqual({ kind: "allow" });
+	});
+
+	it("rejects missing or invalid basic credentials when a password is configured", () => {
+		expect(
+			evaluateAccessAuth({
+				authorizationHeader: undefined,
+				cookieHeader: undefined,
+				password: "secret",
+				username: "quarterdeck",
+			}),
+		).toEqual({
+			kind: "reject",
+		});
+		expect(
+			evaluateAccessAuth({
+				authorizationHeader: `Basic ${Buffer.from("quarterdeck:wrong").toString("base64")}`,
+				cookieHeader: undefined,
+				password: "secret",
+				username: "quarterdeck",
+			}),
+		).toEqual({ kind: "reject" });
+	});
 });
 
 describe("handleSocketUpgrade", () => {
@@ -158,5 +248,34 @@ describe("handleSocketUpgrade", () => {
 
 		expect(handleSocketUpgrade(request, socket)).toEqual({ end: true });
 		expect(socket.destroyed).toBe(true);
+	});
+
+	it("allows authenticated tunnel upgrades when the external host is configured", () => {
+		process.env.QUARTERDECK_ALLOWED_HOSTS = "kanban.example.com";
+		process.env.QUARTERDECK_ACCESS_PASSWORD = "secret";
+		const socket = new PassThrough();
+		const credentials = Buffer.from("quarterdeck:secret").toString("base64");
+		const request = makeFakeRequest({
+			host: "kanban.example.com",
+			origin: "https://kanban.example.com",
+			authorization: `Basic ${credentials}`,
+		});
+
+		expect(handleSocketUpgrade(request, socket)).toEqual({ end: false });
+		expect(socket.destroyed).toBe(false);
+	});
+
+	it("allows tunnel upgrades with the access cookie after browser login", () => {
+		process.env.QUARTERDECK_ALLOWED_HOSTS = "kanban.example.com";
+		process.env.QUARTERDECK_ACCESS_PASSWORD = "secret";
+		const socket = new PassThrough();
+		const request = makeFakeRequest({
+			host: "kanban.example.com",
+			origin: "https://kanban.example.com",
+			cookie: "quarterdeck_access=e952d0361eefc8269bd0a0e7bead40110e2255cee73831079c5924adbeeb1085",
+		});
+
+		expect(handleSocketUpgrade(request, socket)).toEqual({ end: false });
+		expect(socket.destroyed).toBe(false);
 	});
 });
