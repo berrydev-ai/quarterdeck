@@ -53,6 +53,7 @@ Optional variables:
 | `QUARTERDECK_ALLOWED_HOSTS` | Comma-separated extra browser-facing hosts allowed by the runtime Host/Origin gate, for example `kanban.example.com` or `https://kanban.example.com`. Use this when serving Quarterdeck through a Cloudflare Tunnel or similar proxy. |
 | `QUARTERDECK_ACCESS_PASSWORD` | Enables HTTP Basic password protection for the web UI, tRPC API, runtime-state WebSocket, and terminal WebSockets. |
 | `QUARTERDECK_ACCESS_USERNAME` | Optional username for HTTP Basic auth when `QUARTERDECK_ACCESS_PASSWORD` is set. Defaults to `quarterdeck`. |
+| `QUARTERDECK_ACCESS_COOKIE_SECURE` | Set to `true` to always add `Secure` to the access cookie. Quarterdeck also adds `Secure` automatically when a proxy sends `X-Forwarded-Proto: https`. |
 | `QUARTERDECK_DEBUG_MODE` | Enable extra debug behavior for agent availability checks. `DEBUG_MODE` and `debug_mode` are also recognized. |
 | `QUARTERDECK_LLM_BASE_URL` | OpenAI-compatible helper API base URL for generated titles, branch names, commit messages, and optional summary polish. May be a LiteLLM, Bedrock, OpenRouter, or similar gateway. |
 | `QUARTERDECK_LLM_API_KEY` | Bearer token for the optional helper API. |

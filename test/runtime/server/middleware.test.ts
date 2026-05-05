@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
 	evaluateHost,
 	getAllowedHostHeaders,
 	getAllowedRuntimeOrigins,
+	handleHttpRequest,
 	handleSocketUpgrade,
 } from "../../../src/server/middleware";
 
@@ -24,9 +25,44 @@ const originalE2eWebPort = process.env.QUARTERDECK_E2E_WEB_PORT;
 const originalAllowedHosts = process.env.QUARTERDECK_ALLOWED_HOSTS;
 const originalAccessUsername = process.env.QUARTERDECK_ACCESS_USERNAME;
 const originalAccessPassword = process.env.QUARTERDECK_ACCESS_PASSWORD;
+const originalAccessCookieSecure = process.env.QUARTERDECK_ACCESS_COOKIE_SECURE;
 
 function makeFakeRequest(headers: Partial<IncomingMessage["headers"]>, method = "GET"): IncomingMessage {
 	return { method, headers } as IncomingMessage;
+}
+
+function makeFakeResponse(): ServerResponse & {
+	headers: Record<string, number | string | string[]>;
+	statusCodeValue: number | null;
+	body: string;
+} {
+	const response = {
+		headers: {} as Record<string, number | string | string[]>,
+		statusCodeValue: null as number | null,
+		body: "",
+		setHeader(name: string, value: number | string | string[]) {
+			this.headers[name] = value;
+			return this;
+		},
+		writeHead(statusCode: number, headers?: Record<string, number | string | string[]>) {
+			this.statusCodeValue = statusCode;
+			if (headers) {
+				for (const [name, value] of Object.entries(headers)) {
+					this.headers[name] = value;
+				}
+			}
+			return this;
+		},
+		end(chunk?: string) {
+			this.body = chunk ?? "";
+			return this;
+		},
+	};
+	return response as unknown as ServerResponse & {
+		headers: Record<string, number | string | string[]>;
+		statusCodeValue: number | null;
+		body: string;
+	};
 }
 
 afterEach(() => {
@@ -56,6 +92,11 @@ afterEach(() => {
 		delete process.env.QUARTERDECK_ACCESS_PASSWORD;
 	} else {
 		process.env.QUARTERDECK_ACCESS_PASSWORD = originalAccessPassword;
+	}
+	if (originalAccessCookieSecure === undefined) {
+		delete process.env.QUARTERDECK_ACCESS_COOKIE_SECURE;
+	} else {
+		process.env.QUARTERDECK_ACCESS_COOKIE_SECURE = originalAccessCookieSecure;
 	}
 });
 
@@ -147,11 +188,14 @@ describe("runtime allowlists", () => {
 
 	it("allows externally configured tunnel hosts and derives browser origins", () => {
 		setQuarterdeckRuntimePort(3500);
-		process.env.QUARTERDECK_ALLOWED_HOSTS = "kanban.example.com, https://board.example.com, dev.example.com:8080";
+		process.env.QUARTERDECK_ALLOWED_HOSTS =
+			"kanban.example.com, https://board.example.com, dev.example.com:8080, bad.example.com:notaport, bad.example.com:99999";
 
 		expect(getAllowedHostHeaders()).toContain("kanban.example.com");
 		expect(getAllowedHostHeaders()).toContain("board.example.com");
 		expect(getAllowedHostHeaders()).toContain("dev.example.com:8080");
+		expect(getAllowedHostHeaders()).not.toContain("bad.example.com:notaport");
+		expect(getAllowedHostHeaders()).not.toContain("bad.example.com:99999");
 		expect(getAllowedRuntimeOrigins()).toContain("https://kanban.example.com");
 		expect(getAllowedRuntimeOrigins()).toContain("https://board.example.com");
 		expect(getAllowedRuntimeOrigins()).toContain("http://dev.example.com:8080");
@@ -214,6 +258,38 @@ describe("evaluateAccessAuth", () => {
 				username: "quarterdeck",
 			}),
 		).toEqual({ kind: "reject" });
+	});
+});
+
+describe("handleHttpRequest", () => {
+	it("sets Secure on the access cookie for forwarded HTTPS requests", () => {
+		process.env.QUARTERDECK_ACCESS_PASSWORD = "secret";
+		const credentials = Buffer.from("quarterdeck:secret").toString("base64");
+		const request = makeFakeRequest({
+			host: "127.0.0.1:3500",
+			origin: "http://127.0.0.1:3500",
+			authorization: `Basic ${credentials}`,
+			"x-forwarded-proto": "https",
+		});
+		const response = makeFakeResponse();
+
+		expect(handleHttpRequest(request, response)).toEqual({ end: false });
+		expect(response.headers["Set-Cookie"]).toContain("Secure");
+	});
+
+	it("can force Secure on the access cookie through environment config", () => {
+		process.env.QUARTERDECK_ACCESS_PASSWORD = "secret";
+		process.env.QUARTERDECK_ACCESS_COOKIE_SECURE = "true";
+		const credentials = Buffer.from("quarterdeck:secret").toString("base64");
+		const request = makeFakeRequest({
+			host: "127.0.0.1:3500",
+			origin: "http://127.0.0.1:3500",
+			authorization: `Basic ${credentials}`,
+		});
+		const response = makeFakeResponse();
+
+		expect(handleHttpRequest(request, response)).toEqual({ end: false });
+		expect(response.headers["Set-Cookie"]).toContain("Secure");
 	});
 });
 

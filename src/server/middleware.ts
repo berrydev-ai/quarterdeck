@@ -38,6 +38,11 @@ export interface AccessAuthInput {
 	username: string;
 }
 
+interface AccessCredentials {
+	password: string | null;
+	username: string;
+}
+
 function isDevelopmentMode(): boolean {
 	return process.env.NODE_ENV === "development";
 }
@@ -79,6 +84,37 @@ function getDevelopmentWebUiPorts(): number[] {
 	return [...ports];
 }
 
+function parseAllowedHostEntry(value: string): { host: string; origins: string[] } | null {
+	if (value.startsWith("http://") || value.startsWith("https://")) {
+		try {
+			const url = new URL(value);
+			if (!url.host) {
+				return null;
+			}
+			return { host: url.host.toLowerCase(), origins: [url.origin] };
+		} catch {
+			return null;
+		}
+	}
+
+	if (value.includes("/") || value.includes("@")) {
+		return null;
+	}
+
+	try {
+		const url = new URL(`https://${value}`);
+		if (!url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+			return null;
+		}
+		return {
+			host: url.host.toLowerCase(),
+			origins: [`http://${url.host.toLowerCase()}`, `https://${url.host.toLowerCase()}`],
+		};
+	} catch {
+		return null;
+	}
+}
+
 function parseExternalHostAllowlist(): Array<{ host: string; origins: string[] }> {
 	const raw = process.env.QUARTERDECK_ALLOWED_HOSTS?.trim();
 	if (!raw) {
@@ -92,26 +128,10 @@ function parseExternalHostAllowlist(): Array<{ host: string; origins: string[] }
 			continue;
 		}
 
-		if (value.startsWith("http://") || value.startsWith("https://")) {
-			try {
-				const url = new URL(value);
-				if (!url.host) {
-					continue;
-				}
-				entries.push({ host: url.host.toLowerCase(), origins: [url.origin] });
-			} catch {
-				continue;
-			}
-			continue;
+		const parsed = parseAllowedHostEntry(value);
+		if (parsed !== null) {
+			entries.push(parsed);
 		}
-
-		if (value.includes("/") || value.includes("@")) {
-			continue;
-		}
-		entries.push({
-			host: value.toLowerCase(),
-			origins: [`http://${value.toLowerCase()}`, `https://${value.toLowerCase()}`],
-		});
 	}
 	return entries;
 }
@@ -199,6 +219,13 @@ function getAccessUsername(): string {
 	return process.env.QUARTERDECK_ACCESS_USERNAME?.trim() || "quarterdeck";
 }
 
+function getAccessCredentials(): AccessCredentials {
+	return {
+		password: getAccessPassword(),
+		username: getAccessUsername(),
+	};
+}
+
 function timingSafeStringEqual(a: string, b: string): boolean {
 	const left = Buffer.from(a);
 	const right = Buffer.from(b);
@@ -262,9 +289,10 @@ export function evaluateAccessAuth(input: AccessAuthInput): AccessAuthDecision {
 	return { kind: "allow" };
 }
 
-function buildAccessCookie(username: string, password: string): string {
+function buildAccessCookie(username: string, password: string, secure: boolean): string {
 	const token = buildAccessToken(username, password);
-	return `quarterdeck_access=${token}; Path=/; HttpOnly; SameSite=Lax`;
+	const secureAttribute = secure ? "; Secure" : "";
+	return `quarterdeck_access=${token}; Path=/; HttpOnly; SameSite=Lax${secureAttribute}`;
 }
 
 function applyAllowedOriginHeaders(res: ServerResponse, origin: string): void {
@@ -306,6 +334,23 @@ function rejectUnauthorizedSocketUpgrade(socket: Duplex): { end: true } {
 	return { end: true };
 }
 
+function getHeaderValue(value: string | string[] | undefined): string | undefined {
+	return Array.isArray(value) ? value[0] : value;
+}
+
+function isAccessCookieSecureRequest(req: IncomingMessage): boolean {
+	const forwardedProto = getHeaderValue(req.headers["x-forwarded-proto"])?.toLowerCase();
+	if (
+		forwardedProto
+			?.split(",")
+			.map((value) => value.trim())
+			.includes("https")
+	) {
+		return true;
+	}
+	return process.env.QUARTERDECK_ACCESS_COOKIE_SECURE === "true";
+}
+
 export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): { end: boolean } {
 	const hostDecision = evaluateHost({
 		hostHeader: req.headers.host,
@@ -325,20 +370,25 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): { 
 			if (corsDecision.origin !== null) {
 				applyAllowedOriginHeaders(res, corsDecision.origin);
 			}
+			const accessCredentials = getAccessCredentials();
 			const authDecision = evaluateAccessAuth({
-				authorizationHeader: Array.isArray(req.headers.authorization)
-					? req.headers.authorization[0]
-					: req.headers.authorization,
-				cookieHeader: Array.isArray(req.headers.cookie) ? req.headers.cookie[0] : req.headers.cookie,
-				password: getAccessPassword(),
-				username: getAccessUsername(),
+				authorizationHeader: getHeaderValue(req.headers.authorization),
+				cookieHeader: getHeaderValue(req.headers.cookie),
+				password: accessCredentials.password,
+				username: accessCredentials.username,
 			});
 			if (authDecision.kind === "reject") {
 				return rejectUnauthorizedHttpRequest(res);
 			}
-			const accessPassword = getAccessPassword();
-			if (accessPassword !== null) {
-				res.setHeader("Set-Cookie", buildAccessCookie(getAccessUsername(), accessPassword));
+			if (accessCredentials.password !== null) {
+				res.setHeader(
+					"Set-Cookie",
+					buildAccessCookie(
+						accessCredentials.username,
+						accessCredentials.password,
+						isAccessCookieSecureRequest(req),
+					),
+				);
 			}
 			return { end: false };
 		}
@@ -376,10 +426,8 @@ export function handleSocketUpgrade(request: IncomingMessage, socket: Duplex): {
 	}
 
 	const authDecision = evaluateAccessAuth({
-		authorizationHeader: Array.isArray(request.headers.authorization)
-			? request.headers.authorization[0]
-			: request.headers.authorization,
-		cookieHeader: Array.isArray(request.headers.cookie) ? request.headers.cookie[0] : request.headers.cookie,
+		authorizationHeader: getHeaderValue(request.headers.authorization),
+		cookieHeader: getHeaderValue(request.headers.cookie),
 		password: getAccessPassword(),
 		username: getAccessUsername(),
 	});

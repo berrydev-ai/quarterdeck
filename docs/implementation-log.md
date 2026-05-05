@@ -4,7 +4,7 @@
 
 ## 2026-05-04 — Runtime tunnel access gate
 
-Runtime request hardening now supports explicit remote-access configuration instead of only local bind hosts. `QUARTERDECK_ALLOWED_HOSTS` adds browser-facing Host/Origin entries for proxies such as Cloudflare Tunnel while keeping the default local allowlist narrow. `QUARTERDECK_ACCESS_PASSWORD` enables HTTP Basic auth across static assets, tRPC, runtime-state WebSockets, and terminal WebSockets, with `QUARTERDECK_ACCESS_USERNAME` defaulting to `quarterdeck`.
+Runtime request hardening now supports explicit remote-access configuration instead of only local bind hosts. `QUARTERDECK_ALLOWED_HOSTS` adds browser-facing Host/Origin entries for proxies such as Cloudflare Tunnel while keeping the default local allowlist narrow. `QUARTERDECK_ACCESS_PASSWORD` enables HTTP Basic auth across static assets, tRPC, runtime-state WebSockets, and terminal WebSockets, with `QUARTERDECK_ACCESS_USERNAME` defaulting to `quarterdeck`. The access cookie is marked `Secure` when a proxy reports `X-Forwarded-Proto: https`, or when `QUARTERDECK_ACCESS_COOKIE_SECURE=true`.
 
 The key invariant is that remote access remains opt-in and shares the same middleware path as local Host/Origin enforcement, so HTTP and WebSocket gates cannot drift. Notable files: `src/server/middleware.ts`, `test/runtime/server/middleware.test.ts`, and `README.md`. Validation: focused middleware tests. Commit: pending.
 
