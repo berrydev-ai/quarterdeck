@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fix: support tunneled runtime access
+
+- Runtime Host/Origin checks now accept explicitly configured browser-facing hosts for Cloudflare Tunnel or similar proxy access, and the runtime can require HTTP Basic auth across the web UI, tRPC API, runtime-state WebSocket, and terminal WebSockets.
+
 ## [0.12.3] — 2026-05-02
 
 ### Docs: version bump to 0.12.3
